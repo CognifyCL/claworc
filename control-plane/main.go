@@ -479,6 +479,7 @@ func main() {
 				r.Post("/skills", handlers.UploadSkill)
 				r.Delete("/skills/{slug}", handlers.DeleteSkill)
 				r.Get("/skills/clawhub/search", handlers.ClawhubSearch)
+				r.Post("/skills/clawhub/import", handlers.ImportClawhubSkill)
 				r.Put("/skills/{slug}/files/*", handlers.PutSkillFile)
 
 				// Teams CRUD + membership + provider whitelist
