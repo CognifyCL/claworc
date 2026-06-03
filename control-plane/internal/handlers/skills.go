@@ -346,34 +346,36 @@ func UploadSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 // isSafeSlug reports whether slug is a single, safe path component: non-empty,
-// no path separators, and not a "." / ".." traversal element.
+// no path separators, and a local path (no absolute paths or ".." traversal).
+// filepath.IsLocal is the canonical containment check (and is recognized as a
+// path-injection sanitizer).
 func isSafeSlug(slug string) bool {
-	if slug == "" || slug == "." || slug == ".." {
+	if slug == "" {
 		return false
 	}
 	if strings.ContainsRune(slug, '/') || strings.ContainsRune(slug, '\\') {
 		return false
 	}
-	// filepath.Clean of a safe single component is the component itself.
-	return filepath.Clean(slug) == slug
+	return filepath.IsLocal(slug)
 }
 
 // safeJoin joins a user-supplied (slash-separated) relative name onto baseDir,
 // guaranteeing the result stays within baseDir. It rejects absolute paths and
-// any ".." traversal that would escape baseDir.
+// any ".." traversal that would escape baseDir by requiring the localized,
+// cleaned name to be a local path (filepath.IsLocal) before joining.
 func safeJoin(baseDir, name string) (string, error) {
-	cleanName := path.Clean("/" + filepath.ToSlash(name)) // force-rooted, collapses ".."
-	rel := strings.TrimPrefix(cleanName, "/")
-	if rel == "" || rel == "." {
+	// Normalize slash-separated archive names to the OS separator and collapse
+	// any "." / ".." segments.
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if clean == "" || clean == "." {
 		return "", fmt.Errorf("empty path")
 	}
-	dest := filepath.Join(baseDir, filepath.FromSlash(rel))
-	// Defense in depth: confirm dest is contained within baseDir.
-	prefix := baseDir + string(os.PathSeparator)
-	if dest != baseDir && !strings.HasPrefix(dest, prefix) {
+	// filepath.IsLocal rejects absolute paths and anything that escapes the
+	// current directory (e.g. "../x"); it is modeled as a sanitizer barrier.
+	if !filepath.IsLocal(clean) {
 		return "", fmt.Errorf("path escapes base directory")
 	}
-	return dest, nil
+	return filepath.Join(baseDir, clean), nil
 }
 
 // saveSkillToLibrary writes the given file map to {DataPath}/skills/{slug} and

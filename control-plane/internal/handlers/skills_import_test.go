@@ -86,7 +86,7 @@ func TestSaveSkillToLibrary_RejectsUnsafeSlug(t *testing.T) {
 	}
 }
 
-func TestSaveSkillToLibrary_ContainsTraversalFileName(t *testing.T) {
+func TestSaveSkillToLibrary_RejectsTraversalFileName(t *testing.T) {
 	dir := setupSkillsTestDB(t)
 
 	fm := &skillFrontmatter{Name: "demo", Description: "demo"}
@@ -95,17 +95,13 @@ func TestSaveSkillToLibrary_ContainsTraversalFileName(t *testing.T) {
 		"../../../etc/pwned": []byte("nope"),
 	}
 
-	if _, err := saveSkillToLibrary("demo", fm, files); err != nil {
-		t.Fatalf("saveSkillToLibrary: %v", err)
+	if _, err := saveSkillToLibrary("demo", fm, files); err == nil {
+		t.Fatal("expected error for traversal file name, got nil")
 	}
 
-	// The traversal must be neutralized: nothing written outside the skills dir...
+	// Nothing must be written outside the skills directory.
 	if _, err := os.Stat(filepath.Join(dir, "etc", "pwned")); err == nil {
 		t.Error("traversal file escaped outside the skills dir")
-	}
-	// ...and the entry is contained within the skill's own directory instead.
-	if _, err := os.Stat(filepath.Join(dir, "skills", "demo", "etc", "pwned")); err != nil {
-		t.Errorf("expected traversal entry to be contained under skill dir: %v", err)
 	}
 }
 
