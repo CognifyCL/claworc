@@ -3,6 +3,9 @@ import type {
   Skill,
   ClawhubSearchResponse,
   DeployResponse,
+  InstanceSkill,
+  SkillFileEntry,
+  SkillFileContent,
 } from "@common/types/skills";
 
 export async function listSkills(): Promise<Skill[]> {
@@ -46,16 +49,23 @@ export async function searchClawhub(
   return res.data;
 }
 
-export interface SkillFileEntry {
-  path: string;
-  size: number;
-  binary: boolean;
+export async function listInstanceSkills(id: number): Promise<InstanceSkill[]> {
+  const { data } = await client.get<InstanceSkill[]>(`/instances/${id}/skills`);
+  return data;
 }
 
-export interface SkillFileContent {
-  path: string;
-  content: string;
-  binary: boolean;
+export async function listInstanceSkillFiles(id: number, slug: string): Promise<SkillFileEntry[]> {
+  const { data } = await client.get<SkillFileEntry[]>(`/instances/${id}/skills/${slug}/files`);
+  return data;
+}
+
+export async function getInstanceSkillFile(id: number, slug: string, path: string): Promise<SkillFileContent> {
+  const { data } = await client.get<SkillFileContent>(`/instances/${id}/skills/${slug}/files/${encodeSkillPath(path)}`);
+  return data;
+}
+
+export async function saveInstanceSkillFile(id: number, slug: string, path: string, content: string): Promise<void> {
+  await client.put(`/instances/${id}/skills/${slug}/files/${encodeSkillPath(path)}`, { content });
 }
 
 function encodeSkillPath(path: string): string {

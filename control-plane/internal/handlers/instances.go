@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -633,6 +635,23 @@ func restartInstanceAsyncWithToast(inst database.Instance, userID uint, title, m
 					"status":     "error",
 					"updated_at": time.Now().UTC(),
 				})
+			} else {
+				// Re-fetch instance and configure it (syncs models, providers, and MCP keys)
+				var currentInst database.Instance
+				if err := database.DB.First(&currentInst, inst.ID).Error; err == nil {
+					models := resolveInstanceModels(currentInst)
+					gatewayProviders := resolveGatewayProviders(currentInst)
+					
+					go func() {
+						bgCtx := context.Background()
+						sshClient, err := SSHMgr.WaitForSSH(bgCtx, currentInst.ID, 120*time.Second)
+						if err != nil {
+							log.Printf("Failed to get SSH connection for instance %d during configure after restart: %v", currentInst.ID, err)
+							return
+						}
+						ConfigureInstance(bgCtx, orch, sshproxy.NewSSHInstance(sshClient), currentInst.Name, models, gatewayProviders, config.Cfg.LLMGatewayPort)
+					}()
+				}
 			}
 		})
 }
@@ -1607,6 +1626,22 @@ func DeleteInstance(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Failed to delete browser pod for %s: %v", utils.SanitizeForLog(inst.Name), err)
 			}
 		}
+
+		// Clean up any MCP sidecar containers for this instance
+		var skills []database.Skill
+		if err := database.DB.Find(&skills).Error; err == nil {
+			for _, skill := range skills {
+				skillDir := filepath.Join(config.Cfg.DataPath, "skills", skill.Slug)
+				content, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+				if err == nil {
+					if fm, err := parseSkillFrontmatter(content); err == nil && fm.MCP != nil && fm.MCP.Transport == "sse" {
+						sidecarName := fmt.Sprintf("mcp-%d-%s", inst.ID, skill.Slug)
+						_ = orch.DeleteWorkload(r.Context(), orchestrator.WorkloadSpec{Name: sidecarName})
+					}
+				}
+			}
+		}
+
 		if err := orch.DeleteInstance(r.Context(), inst.Name); err != nil {
 			log.Printf("Failed to delete container resources for %s – proceeding with DB cleanup: %v", utils.SanitizeForLog(inst.Name), err)
 		}
@@ -2248,6 +2283,41 @@ func ConfigureInstance(ctx context.Context, ops orchestrator.ContainerOrchestrat
 					utils.SanitizeForLog(name), utils.SanitizeForLog(stdout), utils.SanitizeForLog(stderr))
 			}
 		}
+	}
+
+	// Configure Composio MCP server dynamically based on environment variables
+	var dbInst database.Instance
+	if err := database.DB.Where("name = ?", name).First(&dbInst).Error; err == nil {
+		globalEnv := LoadGlobalEnvVars()
+		instEnv := LoadInstanceEnvVars(dbInst)
+
+		mergedEnv := make(map[string]string)
+		MergeUserEnvVars(mergedEnv, globalEnv, instEnv)
+
+		if composioAPIKey, exists := mergedEnv["COMPOSIO_API_KEY"]; exists && composioAPIKey != "" {
+			// Add/update Composio MCP server using the hosted gateway (SSE)
+			_, stderr, code, err := inst.ExecOpenclaw(ctx, "mcp", "add", "composio",
+				"--transport", "sse",
+				"--url", "https://connect.composio.dev/mcp",
+				"--header", "x-consumer-api-key="+composioAPIKey,
+				"--header", "Authorization=Bearer "+composioAPIKey,
+				"--no-probe")
+			if err != nil {
+				log.Printf("Error setting Composio MCP for %s: %v", utils.SanitizeForLog(name), err)
+			} else if code != 0 {
+				log.Printf("Failed to set Composio MCP for %s: code=%d stderr=%q", utils.SanitizeForLog(name), code, utils.SanitizeForLog(stderr))
+			} else {
+				log.Printf("Composio MCP server successfully configured for %s", utils.SanitizeForLog(name))
+			}
+		} else {
+			// If not set, ensure composio MCP is unset/removed
+			_, _, code, err := inst.ExecOpenclaw(ctx, "mcp", "unset", "composio")
+			if err == nil && code == 0 {
+				log.Printf("Composio MCP server disabled/removed for %s", utils.SanitizeForLog(name))
+			}
+		}
+	} else {
+		log.Printf("Could not find instance %s in database to configure Composio MCP", utils.SanitizeForLog(name))
 	}
 
 	// Restart gateway so it picks up new env vars and config

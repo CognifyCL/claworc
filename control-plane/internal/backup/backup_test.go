@@ -69,6 +69,9 @@ func (m *mockOrch) EnsureSSHAccess(_ context.Context, _, _ string) error        
 func (m *mockOrch) WorkloadSSHAddress(_ context.Context, _ string) (string, int, error) {
 	return "", 0, nil
 }
+func (m *mockOrch) StreamWorkloadLogs(ctx context.Context, name string, follow bool, tailLines int64, writer io.Writer) error {
+	return nil
+}
 
 // --- test helpers ---
 

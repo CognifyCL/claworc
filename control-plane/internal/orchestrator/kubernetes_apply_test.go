@@ -221,6 +221,47 @@ func TestApply_NetworkPolicy_AllowsControlPlaneOnlyForExposedPorts(t *testing.T)
 	}
 }
 
+func TestApply_NetworkPolicy_AllowsIngressAllowedFrom(t *testing.T) {
+	k := newFakeOrchestrator(t)
+	ctx := context.Background()
+
+	spec := browserSpec()
+	spec.IngressAllowedFrom = []string{"bot-foo", "bot-bar"}
+
+	if err := k.Apply(ctx, spec); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	netpol, err := k.clientset.NetworkingV1().NetworkPolicies("claworc").Get(ctx, "bot-foo-browser", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get networkpolicy: %v", err)
+	}
+
+	// We expect 3 ingress rules: 1 for control-plane, and 1 for each IngressAllowedFrom app
+	if len(netpol.Spec.Ingress) != 3 {
+		t.Fatalf("expected 3 ingress rules, got %d", len(netpol.Spec.Ingress))
+	}
+
+	// The first rule should be the control-plane one
+	cpRule := netpol.Spec.Ingress[0]
+	if len(cpRule.From) != 1 || cpRule.From[0].PodSelector.MatchLabels["app.kubernetes.io/name"] != "claworc" {
+		t.Errorf("expected first rule to allow claworc, got %+v", cpRule)
+	}
+
+	// The subsequent rules should allow ingress from the allowed apps
+	allowed := map[string]bool{}
+	for _, rule := range netpol.Spec.Ingress[1:] {
+		if len(rule.From) != 1 || rule.From[0].PodSelector == nil {
+			t.Fatalf("ingress rule.From should be a single PodSelector peer, got %+v", rule.From)
+		}
+		appLabel := rule.From[0].PodSelector.MatchLabels["app"]
+		allowed[appLabel] = true
+	}
+
+	if !allowed["bot-foo"] || !allowed["bot-bar"] {
+		t.Errorf("expected bot-foo and bot-bar in allowed ingress, got %+v", allowed)
+	}
+}
+
 func TestApply_NoPorts_DeletesStaleService_AndNetworkPolicy(t *testing.T) {
 	k := newFakeOrchestrator(t)
 	ctx := context.Background()

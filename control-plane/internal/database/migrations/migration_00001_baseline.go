@@ -48,6 +48,7 @@ func AutoMigrateAll(gdb interface {
 		&models.LLMProvider{},
 		&models.LLMGatewayKey{},
 		&models.Skill{},
+		&models.InstanceSkill{},
 		&models.Backup{},
 		&models.BackupSchedule{},
 		&models.SharedFolder{},

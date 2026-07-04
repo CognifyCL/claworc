@@ -524,6 +524,9 @@ func (d *DockerOrchestrator) GetInstanceStatus(ctx context.Context, name string)
 
 	switch status {
 	case "running":
+		if inspect.State.Health == nil {
+			return "running", nil
+		}
 		switch health {
 		case "healthy":
 			return "running", nil
@@ -811,6 +814,26 @@ func demuxDockerStream(reader io.Reader, stdoutW io.Writer, stderrW io.Writer) e
 			return err
 		}
 	}
+}
+
+func (d *DockerOrchestrator) StreamWorkloadLogs(ctx context.Context, name string, follow bool, tailLines int64, writer io.Writer) error {
+	opts := container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     follow,
+	}
+	if tailLines > 0 {
+		opts.Tail = fmt.Sprintf("%d", tailLines)
+	} else {
+		opts.Tail = "all"
+	}
+	reader, err := d.client.ContainerLogs(ctx, name, opts)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	return demuxDockerStream(reader, writer, writer)
 }
 
 // Ensure DockerOrchestrator implements ContainerOrchestrator

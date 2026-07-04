@@ -10,6 +10,7 @@ import "github.com/gluk-w/claworc/control-plane/internal/database/models"
 
 type (
 	Skill              = models.Skill
+	InstanceSkill      = models.InstanceSkill
 	Instance           = models.Instance
 	Team               = models.Team
 	TeamMember         = models.TeamMember

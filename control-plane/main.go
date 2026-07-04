@@ -358,6 +358,13 @@ func main() {
 			r.Post("/instances/{id}/files/copy", handlers.CopyFile)
 			r.Get("/instances/{id}/files/search", handlers.SearchFiles)
 
+			// Skills
+			r.Get("/instances/{id}/skills", handlers.ListInstanceSkills)
+			r.Get("/instances/{id}/skills/{slug}/files", handlers.ListInstanceSkillFiles)
+			r.Get("/instances/{id}/skills/{slug}/files/*", handlers.GetInstanceSkillFile)
+			r.Put("/instances/{id}/skills/{slug}/files/*", handlers.PutInstanceSkillFile)
+			r.Get("/instances/{id}/skills/{slug}/logs", handlers.StreamInstanceSkillLogs)
+
 			// Webhook (per-instance) — admin or team manager via CanAccessInstance
 			r.Get("/instances/{id}/webhook", handlers.GetInstanceWebhook)
 			r.Post("/instances/{id}/webhook/keys", handlers.CreateInstanceWebhookKey)
@@ -431,6 +438,7 @@ func main() {
 			r.Get("/skills/{slug}/files", handlers.ListSkillFiles)
 			r.Get("/skills/{slug}/files/*", handlers.GetSkillFile)
 			r.Post("/skills/{slug}/deploy", handlers.DeploySkill)
+			r.Post("/skills/{slug}/undeploy", handlers.UndeploySkill)
 
 			// Instance creators (admin or users who manage at least one team).
 			r.Group(func(r chi.Router) {

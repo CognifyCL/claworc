@@ -235,12 +235,23 @@ func (k *KubernetesOrchestrator) applyNetworkPolicy(ctx context.Context, ns stri
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": spec.Name}},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
-			Ingress: []networkingv1.NetworkPolicyIngressRule{{
-				From: []networkingv1.NetworkPolicyPeer{{
-					PodSelector: &metav1.LabelSelector{MatchLabels: controlPlaneSelector},
-				}},
-				Ports: policyPorts,
-			}},
+			Ingress: func() []networkingv1.NetworkPolicyIngressRule {
+				rules := []networkingv1.NetworkPolicyIngressRule{{
+					From: []networkingv1.NetworkPolicyPeer{{
+						PodSelector: &metav1.LabelSelector{MatchLabels: controlPlaneSelector},
+					}},
+					Ports: policyPorts,
+				}}
+				for _, appName := range spec.IngressAllowedFrom {
+					rules = append(rules, networkingv1.NetworkPolicyIngressRule{
+						From: []networkingv1.NetworkPolicyPeer{{
+							PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": appName}},
+						}},
+						Ports: policyPorts,
+					})
+				}
+				return rules
+			}(),
 		},
 	}
 	existing, err := k.clientset.NetworkingV1().NetworkPolicies(ns).Get(ctx, spec.Name, metav1.GetOptions{})

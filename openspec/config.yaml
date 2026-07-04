@@ -1,0 +1,71 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Go Chi SQLite backend, React TS Vite frontend, Docker/K8s agent.
+  Architecture: Container orchestrator + SQLite DB with SSH Proxy and SSH Audit logging.
+  Testing: vitest (agent), go test (backend), playwright (E2E).
+  Style: Go conventions, React functional components, Tailwind CSS v4.
+
+strict_tdd: true
+
+testing:
+  strict_tdd: true
+  detected_date: "2026-07-03"
+  test_runners:
+    backend:
+      command: "cd control-plane && go test ./internal/..."
+      framework: "go test"
+    agent:
+      command: "cd agent/tests && npm run test"
+      framework: "vitest"
+    e2e:
+      command: "cd e2e && npm run test"
+      framework: "playwright"
+  layers:
+    unit:
+      available: true
+      tool: "go test, vitest"
+    integration:
+      available: true
+      tool: "go test -tags docker_integration"
+    e2e:
+      available: true
+      tool: "playwright"
+  coverage:
+    available: true
+    commands:
+      backend: "cd control-plane && go test -cover ./internal/..."
+      agent: "cd agent/tests && npx vitest run --coverage"
+  quality_tools:
+    linter:
+      available: false
+      command: ""
+    type_checker:
+      available: true
+      command: "cd control-plane/frontend && npm run build"
+    formatter:
+      available: false
+      command: ""
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns
+    tdd: true
+    test_command: "cd agent/tests && npm run test"
+  verify:
+    test_command: "cd agent/tests && npm run test"
+    build_command: "cd control-plane/frontend && npm run build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas

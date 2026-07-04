@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, createElement } from "react";
 import { Link, useParams, useNavigate, useLocation } from "react-router-dom";
-import { AlertTriangle, Eye, X, Maximize, ExternalLink, Plus } from "lucide-react";
+import { AlertTriangle, Eye, X, Maximize, ExternalLink, Plus, Pencil } from "lucide-react";
 import { useAuth } from "@common/contexts/AuthContext";
 import { useTeam } from "@common/contexts/TeamContext";
 import StatusBadge from "@common/components/StatusBadge";
@@ -53,7 +53,9 @@ import AppToast from "@common/components/AppToast";
 import { infoToast } from "@common/utils/toast";
 import toast from "react-hot-toast";
 import { useSSHStatus, useSSHEvents } from "@common/hooks/useSSHStatus";
-import { useInstanceLogs } from "@common/hooks/useInstanceLogs";
+import { useInstanceLogs, useInstanceSkillLogs } from "@common/hooks/useInstanceLogs";
+import { useInstanceSkills, useSkillFile } from "@common/hooks/useSkills";
+import SkillEditorModal from "@common/components/skills/SkillEditorModal";
 import { useTerminal } from "@common/hooks/useTerminal";
 import { useDesktop } from "@common/hooks/useDesktop";
 import { useChat } from "@common/hooks/useChat";
@@ -62,7 +64,7 @@ import { stopBrowser } from "@common/api/browser";
 import type { InstanceUpdatePayload } from "@common/types/instance";
 import { buildSSHTooltip } from "@common/utils/sshTooltip";
 
-type Tab = "chat" | "terminal" | "files" | "config" | "logs" | "settings";
+type Tab = "chat" | "terminal" | "files" | "config" | "logs" | "settings" | "skills";
 
 export default function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -107,7 +109,7 @@ export default function AgentDetailPage() {
   // Get initial tab from URL hash (supports #files:///path pattern)
   const getTabFromHash = (): Tab => {
     const hash = location.hash.slice(1); // Remove '#'
-    if (hash === "terminal" || hash === "config" || hash === "logs" || hash === "settings") {
+    if (hash === "terminal" || hash === "config" || hash === "logs" || hash === "settings" || hash === "skills") {
       return hash;
     }
     if (hash === "chat" || hash === "chrome") {
@@ -180,6 +182,11 @@ export default function AgentDetailPage() {
   // Instance provider modal state
   const [instanceProviderModalOpen, setInstanceProviderModalOpen] = useState(false);
   const [editingInstanceProvider, setEditingInstanceProvider] = useState<import("@common/types/instance").LLMProvider | undefined>(undefined);
+
+  // Skills state
+  const [editingSkill, setEditingSkill] = useState<import("@common/types/skills").InstanceSkill | null>(null);
+  const [viewingLogsSkill, setViewingLogsSkill] = useState<import("@common/types/skills").InstanceSkill | null>(null);
+  const { data: instanceSkills = [], isLoading: skillsLoading } = useInstanceSkills(instanceId);
 
 
   // Update tab when hash changes
@@ -532,6 +539,7 @@ export default function AgentDetailPage() {
     { key: "config", label: "Config" },
     { key: "logs", label: "Logs" },
     { key: "settings", label: "Settings" },
+    { key: "skills", label: "Skills" },
   ];
 
   return (
@@ -1262,6 +1270,94 @@ export default function AgentDetailPage() {
           )}
         </div>
       )}
+
+      {activeTab === "skills" && (
+        viewingLogsSkill ? (
+          <SkillLogViewPanel
+            instanceId={instanceId}
+            skill={viewingLogsSkill}
+            onBack={() => setViewingLogsSkill(null)}
+          />
+        ) : (
+          <div className="flex flex-col gap-4 h-[calc(100vh-142px)] min-h-[400px] overflow-y-auto">
+            {skillsLoading ? (
+              <div className="text-center py-8 text-sm text-gray-500">Loading skills...</div>
+            ) : instanceSkills.length === 0 ? (
+              <TabPlaceholder message="No skills deployed on this agent." />
+            ) : (
+              <div className="flex flex-col gap-4">
+                {instance.status !== "running" && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800 flex items-center gap-2">
+                    <AlertTriangle size={16} className="shrink-0" />
+                    Agent is stopped/offline. Showing cached skill definitions from database.
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {instanceSkills.map((skill) => (
+                    <div
+                      key={skill.slug}
+                      className="bg-white border border-gray-200 rounded-lg p-5 flex flex-col justify-between hover:shadow-sm transition-shadow"
+                    >
+                      <div>
+                        <div className="flex items-start justify-between gap-2">
+                          <h4 className="text-sm font-semibold text-gray-900 truncate">{skill.name}</h4>
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                              instance.status !== "running"
+                                ? "bg-gray-100 text-gray-600"
+                                : skill.status === "deployed"
+                                ? "bg-green-100 text-green-800"
+                                : "bg-red-100 text-red-800"
+                            }`}
+                          >
+                            {instance.status !== "running" ? "offline" : skill.status}
+                          </span>
+                        </div>
+                        <p className="text-xs font-mono text-gray-400 mt-1">{skill.slug}</p>
+                        {skill.summary && (
+                          <p className="text-sm text-gray-600 mt-2 line-clamp-2">{skill.summary}</p>
+                        )}
+                        <SkillTransportDetail
+                          instanceId={instanceId}
+                          slug={skill.slug}
+                          isOnline={instance.status === "running"}
+                        />
+                      </div>
+                      <div className="mt-4 flex items-center justify-end gap-2 border-t border-gray-100 pt-3">
+                        <button
+                          onClick={() => setEditingSkill(skill)}
+                          disabled={instance.status !== "running"}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <Pencil size={12} />
+                          Edit Files
+                        </button>
+                        <button
+                          onClick={() => setViewingLogsSkill(skill)}
+                          disabled={instance.status !== "running"}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <Eye size={12} />
+                          View Logs
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      )}
+
+      {editingSkill && (
+        <SkillEditorModal
+          skill={editingSkill}
+          instanceId={instanceId}
+          onClose={() => setEditingSkill(null)}
+        />
+      )}
+
       <ProviderModal
         open={instanceProviderModalOpen}
         mode={editingInstanceProvider ? "edit" : "create"}
@@ -1275,6 +1371,92 @@ export default function AgentDetailPage() {
     </div>
   );
 }
+
+function SkillTransportDetail({
+  instanceId,
+  slug,
+  isOnline,
+}: {
+  instanceId: number;
+  slug: string;
+  isOnline: boolean;
+}) {
+  const { data: fileContent, isLoading } = useSkillFile(
+    isOnline ? slug : null,
+    isOnline ? "SKILL.md" : null,
+    instanceId,
+  );
+
+  if (!isOnline) {
+    return <p className="text-xs text-gray-400 mt-2 font-mono">Transport: unknown (offline)</p>;
+  }
+  if (isLoading) {
+    return <p className="text-xs text-gray-400 mt-2 font-mono">Transport: loading...</p>;
+  }
+
+  const match = fileContent?.content?.match(/transport:\s*["']?(\w+)["']?/);
+  const transport = match ? match[1] : "stdio";
+
+  return (
+    <div className="mt-2 flex items-center gap-1.5 text-xs text-gray-500 font-mono">
+      <span>Transport:</span>
+      <span className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold">
+        {transport}
+      </span>
+    </div>
+  );
+}
+
+function SkillLogViewPanel({
+  instanceId,
+  skill,
+  onBack,
+}: {
+  instanceId: number;
+  skill: import("@common/types/skills").InstanceSkill;
+  onBack: () => void;
+}) {
+  const logsHook = useInstanceSkillLogs(instanceId, skill.slug, true);
+
+  return (
+    <div className="flex flex-col gap-4 h-[calc(100vh-142px)] min-h-[400px]">
+      <div className="flex items-center justify-between bg-gray-50 px-4 py-2.5 rounded-lg border border-gray-200">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onBack}
+            className="text-sm font-medium text-blue-600 hover:text-blue-800"
+          >
+            &larr; Back to Skills
+          </button>
+          <span className="text-gray-300">|</span>
+          <span className="text-sm font-semibold text-gray-900">
+            Logs for Sidecar: mcp-{instanceId}-{skill.slug}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`w-2 h-2 rounded-full ${
+              logsHook.isConnected ? "bg-green-500" : "bg-red-500 animate-pulse"
+            }`}
+          />
+          <span className="text-xs text-gray-500">
+            {logsHook.isConnected ? "Connected" : "Disconnected"}
+          </span>
+        </div>
+      </div>
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex-1 min-h-0">
+        <LogViewer
+          logs={logsHook.logs}
+          isPaused={logsHook.isPaused}
+          isConnected={logsHook.isConnected}
+          onTogglePause={logsHook.togglePause}
+          onClear={logsHook.clearLogs}
+        />
+      </div>
+    </div>
+  );
+}
+
 
 function BackupStatusCard({ instanceId, instanceName }: { instanceId: number; instanceName: string }) {
   const { data: backups = [] } = useInstanceBackups(instanceId);

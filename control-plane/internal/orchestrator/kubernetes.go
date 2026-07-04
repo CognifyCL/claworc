@@ -844,3 +844,29 @@ func appendSharedVolumes(base []corev1.Volume, sfMounts []SharedFolderMount) []c
 	}
 	return base
 }
+
+func (k *KubernetesOrchestrator) StreamWorkloadLogs(ctx context.Context, name string, follow bool, tailLines int64, writer io.Writer) error {
+	podName, err := k.getPodName(ctx, name)
+	if err != nil {
+		return fmt.Errorf("failed to find pod: %w", err)
+	}
+	if podName == "" {
+		return fmt.Errorf("no pod found for workload: %s", name)
+	}
+	opts := &corev1.PodLogOptions{
+		Follow: follow,
+	}
+	if tailLines > 0 {
+		opts.TailLines = &tailLines
+	}
+	req := k.clientset.CoreV1().Pods(k.ns()).GetLogs(podName, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	_, err = io.Copy(writer, stream)
+	return err
+}
+

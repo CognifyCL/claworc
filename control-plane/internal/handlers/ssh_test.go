@@ -227,6 +227,10 @@ func (m *mockOrchestrator) EnsureSSHAccess(_ context.Context, _, _ string) error
 func (m *mockOrchestrator) WorkloadSSHAddress(_ context.Context, _ string) (string, int, error) {
 	return "", 0, nil
 }
+func (m *mockOrchestrator) StreamWorkloadLogs(_ context.Context, _ string, _ bool, _ int64, _ io.Writer) error {
+	return nil
+}
+
 
 // --- test helpers ---
 
@@ -247,7 +251,7 @@ func setupTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
-	database.DB.AutoMigrate(&database.Instance{}, &database.Setting{}, &database.User{}, &database.UserInstance{})
+	database.DB.AutoMigrate(&database.Instance{}, &database.Setting{}, &database.User{}, &database.UserInstance{}, &database.InstanceSkill{})
 }
 
 func createTestInstance(t *testing.T, name, displayName string) database.Instance {

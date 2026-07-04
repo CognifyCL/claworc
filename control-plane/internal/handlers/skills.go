@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +24,12 @@ import (
 	"github.com/gluk-w/claworc/control-plane/internal/config"
 	"github.com/gluk-w/claworc/control-plane/internal/database"
 	"github.com/gluk-w/claworc/control-plane/internal/middleware"
+	"github.com/gluk-w/claworc/control-plane/internal/orchestrator"
 	"github.com/gluk-w/claworc/control-plane/internal/sshproxy"
 	"github.com/gluk-w/claworc/control-plane/internal/taskmanager"
 	"github.com/go-chi/chi/v5"
 	"gopkg.in/yaml.v3"
+	"gorm.io/gorm/clause"
 )
 
 // ---------------------------------------------------------------------------
@@ -147,11 +153,70 @@ func ClawhubSearch(w http.ResponseWriter, r *http.Request) {
 // SKILL.md frontmatter parsing
 // ---------------------------------------------------------------------------
 
-type skillFrontmatter struct {
-	Name            string   `yaml:"name"`
-	Description     string   `yaml:"description"`
-	RequiredEnvVars []string `yaml:"required_env_vars,omitempty"`
+type mcpDockerConfig struct {
+	Image   string            `yaml:"image"`
+	Command []string          `yaml:"command,omitempty"`
+	Port    int               `yaml:"port"`
+	Env     map[string]string `yaml:"env,omitempty"`
 }
+
+type mcpLocalConfig struct {
+	Command string            `yaml:"command"`
+	Args    []string          `yaml:"args,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty"`
+}
+
+type mcpConfig struct {
+	Name      string           `yaml:"name"`
+	Transport string           `yaml:"transport"` // "sse" or "stdio"
+	Docker    *mcpDockerConfig `yaml:"docker,omitempty"`
+	Local     *mcpLocalConfig  `yaml:"local,omitempty"`
+}
+
+type skillFrontmatter struct {
+	Name            string     `yaml:"name"`
+	Description     string     `yaml:"description"`
+	RequiredEnvVars []string   `yaml:"required_env_vars,omitempty"`
+	MCP             *mcpConfig `yaml:"mcp,omitempty"`
+}
+
+var placeholderRegex = regexp.MustCompile(`\{\{([A-Za-z0-9_]+)\}\}`)
+
+func resolvePlaceholders(input string, env map[string]string) string {
+	return placeholderRegex.ReplaceAllStringFunc(input, func(m string) string {
+		varName := placeholderRegex.FindStringSubmatch(m)[1]
+		if val, ok := env[varName]; ok {
+			return val
+		}
+		return ""
+	})
+}
+
+var slugRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func isValidSlug(slug string) bool {
+	return slugRegex.MatchString(slug)
+}
+
+func resolveRemoteSkillFilePath(slug, relPath string) (string, error) {
+	if !isValidSlug(slug) {
+		return "", fmt.Errorf("invalid skill slug")
+	}
+	if relPath == "" {
+		return "", fmt.Errorf("path required")
+	}
+	cleanRel := path.Clean(relPath)
+	if strings.HasPrefix(cleanRel, "/") || strings.HasPrefix(cleanRel, "..") || cleanRel == ".." {
+		return "", fmt.Errorf("invalid file path")
+	}
+	remoteRoot := "/home/claworc/.openclaw/skills/" + slug
+	absPath := path.Clean(path.Join(remoteRoot, cleanRel))
+	if !strings.HasPrefix(absPath, remoteRoot+"/") && absPath != remoteRoot {
+		return "", fmt.Errorf("invalid file path")
+	}
+	return absPath, nil
+}
+
 
 func parseSkillFrontmatter(content []byte) (*skillFrontmatter, error) {
 	s := string(content)
@@ -856,7 +921,7 @@ func DeploySkill(w http.ResponseWriter, r *http.Request) {
 			wg.Add(1)
 			go func(idx int, instanceID uint) {
 				defer wg.Done()
-				result := deployToInstance(instanceID, slug, fileMap)
+				result := deployToInstance(r.Context(), instanceID, slug, fileMap)
 				result.MissingEnvVars = computeMissingEnvVars(instanceID, requiredEnvVars, globalEnvNames)
 				results[idx] = result
 			}(i, instID)
@@ -885,7 +950,7 @@ func DeploySkill(w http.ResponseWriter, r *http.Request) {
 			Title:        fmt.Sprintf("Deploying %s to %s", slug, instanceLabel),
 			Run: func(ctx context.Context, h *taskmanager.Handle) error {
 				h.UpdateMessage("uploading skill files")
-				result := deployToInstance(instanceID, slug, fileMap)
+				result := deployToInstance(ctx, instanceID, slug, fileMap)
 				if result.Status != "ok" {
 					if result.Error != "" {
 						return fmt.Errorf("%s", result.Error)
@@ -1015,7 +1080,7 @@ func buildSkillFileMap(ctx context.Context, slug, source, version string) (map[s
 	return fileMap, nil
 }
 
-func deployToInstance(instanceID uint, slug string, fileMap map[string][]byte) deploySkillResult {
+func deployToInstance(ctx context.Context, instanceID uint, slug string, fileMap map[string][]byte) deploySkillResult {
 	result := deploySkillResult{InstanceID: instanceID}
 
 	client, ok := SSHMgr.GetConnection(instanceID)
@@ -1027,6 +1092,22 @@ func deployToInstance(instanceID uint, slug string, fileMap map[string][]byte) d
 
 	// Use path (not filepath) for remote Unix paths
 	remoteBase := "/home/claworc/.openclaw/skills/" + slug
+
+	// Clean up old MCP config if previously deployed
+	oldSkillMD, err := sshproxy.ReadFile(client, remoteBase+"/SKILL.md")
+	if err == nil {
+		if oldFM, err := parseSkillFrontmatter(oldSkillMD); err == nil && oldFM.MCP != nil {
+			instanceConn := sshproxy.NewSSHInstance(client)
+			_, _, _, _ = instanceConn.ExecOpenclaw(ctx, "mcp", "unset", oldFM.MCP.Name)
+			if oldFM.MCP.Transport == "sse" {
+				orch := orchestrator.Get()
+				if orch != nil {
+					sidecarName := fmt.Sprintf("mcp-%d-%s", instanceID, slug)
+					_ = orch.DeleteWorkload(ctx, orchestrator.WorkloadSpec{Name: sidecarName})
+				}
+			}
+		}
+	}
 
 	if err := sshproxy.CreateDirectory(client, remoteBase); err != nil {
 		result.Status = "error"
@@ -1051,6 +1132,785 @@ func deployToInstance(instanceID uint, slug string, fileMap map[string][]byte) d
 		}
 	}
 
+	// Check if this skill has an MCP configuration
+	if skillMD, ok := fileMap["SKILL.md"]; ok {
+		if fm, err := parseSkillFrontmatter(skillMD); err == nil && fm.MCP != nil {
+			var inst database.Instance
+			if err := database.DB.First(&inst, instanceID).Error; err != nil {
+				result.Status = "error"
+				result.Error = "Instance not found: " + err.Error()
+				return result
+			}
+
+			globalEnv := LoadGlobalEnvVars()
+			instEnv := LoadInstanceEnvVars(inst)
+			mergedEnv := make(map[string]string)
+			MergeUserEnvVars(mergedEnv, globalEnv, instEnv)
+
+			instanceConn := sshproxy.NewSSHInstance(client)
+
+			if fm.MCP.Transport == "sse" {
+				if fm.MCP.Docker == nil {
+					result.Status = "error"
+					result.Error = "Docker config is required for SSE transport"
+					return result
+				}
+				resolvedEnv := make(map[string]string)
+				for k, v := range fm.MCP.Docker.Env {
+					resolvedEnv[k] = resolvePlaceholders(v, mergedEnv)
+				}
+
+				orch := orchestrator.Get()
+				if orch == nil {
+					result.Status = "error"
+					result.Error = "Orchestrator unavailable"
+					return result
+				}
+
+				sidecarName := fmt.Sprintf("mcp-%d-%s", instanceID, slug)
+				spec := orchestrator.WorkloadSpec{
+					Name:    sidecarName,
+					Image:   fm.MCP.Docker.Image,
+					Command: fm.MCP.Docker.Command,
+					Env:     resolvedEnv,
+					Ports: []orchestrator.PortSpec{
+						{
+							ContainerPort: fm.MCP.Docker.Port,
+						},
+					},
+					Labels: map[string]string{
+						"managed-by":  "claworc",
+						"type":        "mcp-sidecar",
+						"instance_id": fmt.Sprintf("%d", instanceID),
+						"skill":       slug,
+					},
+					IngressAllowedFrom: []string{
+						inst.Name,
+					},
+				}
+				if err := orch.Apply(ctx, spec); err != nil {
+					result.Status = "error"
+					result.Error = "Failed to start sidecar workload: " + err.Error()
+					return result
+				}
+
+				healthy := false
+				for attempt := 0; attempt < 30; attempt++ {
+					status, err := orch.GetInstanceStatus(ctx, sidecarName)
+					if err == nil && status == "running" {
+						healthy = true
+						break
+					}
+					select {
+					case <-ctx.Done():
+						result.Status = "error"
+						result.Error = "Timeout waiting for sidecar container"
+						return result
+					case <-time.After(1 * time.Second):
+					}
+				}
+				if !healthy {
+					result.Status = "error"
+					result.Error = "Sidecar container failed to start or become healthy"
+					return result
+				}
+
+				url := fmt.Sprintf("http://%s:%d/sse", sidecarName, fm.MCP.Docker.Port)
+				_, stderr, code, err := instanceConn.ExecOpenclaw(ctx, "mcp", "add", fm.MCP.Name, "--transport", "sse", "--url", url)
+				if err != nil || code != 0 {
+					result.Status = "error"
+					result.Error = fmt.Sprintf("Failed to register MCP server over SSE: %v (stderr: %s)", err, stderr)
+					return result
+				}
+			} else if fm.MCP.Transport == "stdio" {
+				if fm.MCP.Local == nil {
+					result.Status = "error"
+					result.Error = "Local config is required for stdio transport"
+					return result
+				}
+				resolvedEnv := make(map[string]string)
+				for k, v := range fm.MCP.Local.Env {
+					resolvedEnv[k] = resolvePlaceholders(v, mergedEnv)
+				}
+
+				cmdArgs := []string{"mcp", "add", fm.MCP.Name, "--transport", "stdio", "--command", fm.MCP.Local.Command}
+				if len(fm.MCP.Local.Args) > 0 {
+					joinedArgs := strings.Join(fm.MCP.Local.Args, " ")
+					cmdArgs = append(cmdArgs, "--args", joinedArgs)
+				}
+				for k, v := range resolvedEnv {
+					cmdArgs = append(cmdArgs, "--env", fmt.Sprintf("%s=%s", k, v))
+				}
+
+				_, stderr, code, err := instanceConn.ExecOpenclaw(ctx, cmdArgs...)
+				if err != nil || code != 0 {
+					result.Status = "error"
+					result.Error = fmt.Sprintf("Failed to register MCP server over Stdio: %v (stderr: %s)", err, stderr)
+					return result
+				}
+			}
+		}
+	}
+
+	// Upsert InstanceSkill
+	if skillMD, ok := fileMap["SKILL.md"]; ok {
+		if fm, err := parseSkillFrontmatter(skillMD); err == nil {
+			instSkill := database.InstanceSkill{
+				InstanceID: instanceID,
+				Slug:       slug,
+				Name:       fm.Name,
+				Summary:    fm.Description,
+				Status:     "deployed",
+			}
+			if err := database.DB.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "instance_id"}, {Name: "slug"}},
+				DoUpdates: clause.AssignmentColumns([]string{"name", "summary", "status", "updated_at"}),
+			}).Create(&instSkill).Error; err != nil {
+				log.Printf("Failed to upsert InstanceSkill DB record: %v", err)
+			}
+		}
+	}
+
 	result.Status = "ok"
 	return result
 }
+
+type undeploySkillRequest struct {
+	InstanceIDs []uint `json:"instance_ids"`
+}
+
+type undeploySkillResult struct {
+	InstanceID uint   `json:"instance_id"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+}
+
+func UndeploySkill(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+
+	var req undeploySkillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.InstanceIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "No instance IDs specified")
+		return
+	}
+
+	for _, instID := range req.InstanceIDs {
+		if !middleware.CanMutateInstance(r, instID) {
+			writeError(w, http.StatusForbidden, fmt.Sprintf("Not authorized to undeploy from instance %d", instID))
+			return
+		}
+	}
+
+	results := make([]undeploySkillResult, len(req.InstanceIDs))
+	var wg sync.WaitGroup
+	for i, instID := range req.InstanceIDs {
+		wg.Add(1)
+		go func(idx int, instanceID uint) {
+			defer wg.Done()
+			res := undeploySkillResult{InstanceID: instanceID, Status: "ok"}
+
+			client, ok := SSHMgr.GetConnection(instanceID)
+			if !ok {
+				res.Status = "error"
+				res.Error = "SSH not connected"
+				results[idx] = res
+				return
+			}
+
+			// Read SKILL.md to extract mcpConfig
+			var skillMD []byte
+			localPath := filepath.Join(config.Cfg.DataPath, "skills", slug, "SKILL.md")
+			if data, err := os.ReadFile(localPath); err == nil {
+				skillMD = data
+			} else {
+				if data, err := sshproxy.ReadFile(client, "/home/claworc/.openclaw/skills/"+slug+"/SKILL.md"); err == nil {
+					skillMD = data
+				}
+			}
+
+			if len(skillMD) > 0 {
+				if fm, err := parseSkillFrontmatter(skillMD); err == nil && fm.MCP != nil {
+					instanceConn := sshproxy.NewSSHInstance(client)
+					// Run openclaw mcp unset <name>
+					_, _, _, _ = instanceConn.ExecOpenclaw(r.Context(), "mcp", "unset", fm.MCP.Name)
+
+					if fm.MCP.Transport == "sse" {
+						orch := orchestrator.Get()
+						if orch != nil {
+							sidecarName := fmt.Sprintf("mcp-%d-%s", instanceID, slug)
+							_ = orch.DeleteWorkload(r.Context(), orchestrator.WorkloadSpec{Name: sidecarName})
+						}
+					}
+				}
+			}
+
+			// Delete skill files from instance directory
+			remoteDir := "/home/claworc/.openclaw/skills/" + slug
+			if err := sshproxy.DeletePath(client, remoteDir); err != nil {
+				res.Status = "error"
+				res.Error = "Failed to delete remote files: " + err.Error()
+			} else {
+				// Delete from database
+				if err := database.DB.Where("instance_id = ? AND slug = ?", instanceID, slug).Delete(&database.InstanceSkill{}).Error; err != nil {
+					log.Printf("Failed to delete InstanceSkill DB record: %v", err)
+				}
+			}
+
+			results[idx] = res
+		}(i, instID)
+	}
+	wg.Wait()
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"results": results})
+}
+
+func ListInstanceSkills(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid instance ID")
+		return
+	}
+
+	var inst database.Instance
+	if err := database.DB.First(&inst, id).Error; err != nil {
+		writeError(w, http.StatusNotFound, "Instance not found")
+		return
+	}
+
+	if !middleware.CanAccessInstance(r, inst.ID) {
+		writeError(w, http.StatusForbidden, "Access denied")
+		return
+	}
+
+	client, ok := SSHMgr.GetConnection(inst.ID)
+	if ok {
+		// Online
+		remoteDir := "/home/claworc/.openclaw/skills"
+		entries, err := sshproxy.ListDirectory(client, remoteDir)
+		if err != nil {
+			// If the directory does not exist, delete all InstanceSkill records for this instance
+			if strings.Contains(err.Error(), "No such file or directory") || strings.Contains(err.Error(), "exit status 2") {
+				database.DB.Where("instance_id = ?", inst.ID).Delete(&database.InstanceSkill{})
+				writeJSON(w, http.StatusOK, []database.InstanceSkill{})
+				return
+			}
+			// Other errors: log and fallback
+			ok = false
+		} else {
+			var seenSlugs []string
+			for _, entry := range entries {
+				if entry.Type != "directory" {
+					continue
+				}
+				slug := entry.Name
+				if !isValidSlug(slug) {
+					continue
+				}
+
+				skillMD, err := sshproxy.ReadFile(client, remoteDir+"/"+slug+"/SKILL.md")
+				if err != nil {
+					continue
+				}
+				fm, err := parseSkillFrontmatter(skillMD)
+				if err != nil {
+					continue
+				}
+
+				instSkill := database.InstanceSkill{
+					InstanceID: inst.ID,
+					Slug:       slug,
+					Name:       fm.Name,
+					Summary:    fm.Description,
+					Status:     "deployed",
+				}
+				err = database.DB.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "instance_id"}, {Name: "slug"}},
+					DoUpdates: clause.AssignmentColumns([]string{"name", "summary", "status", "updated_at"}),
+				}).Create(&instSkill).Error
+				if err == nil {
+					seenSlugs = append(seenSlugs, slug)
+				}
+			}
+
+			if len(seenSlugs) > 0 {
+				database.DB.Where("instance_id = ? AND slug NOT IN ?", inst.ID, seenSlugs).Delete(&database.InstanceSkill{})
+			} else {
+				database.DB.Where("instance_id = ?", inst.ID).Delete(&database.InstanceSkill{})
+			}
+		}
+	}
+
+	var skills []database.InstanceSkill
+	if err := database.DB.Where("instance_id = ?", inst.ID).Find(&skills).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to query skills: "+err.Error())
+		return
+	}
+	if skills == nil {
+		skills = []database.InstanceSkill{}
+	}
+	writeJSON(w, http.StatusOK, skills)
+}
+
+func ListInstanceSkillFiles(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid instance ID")
+		return
+	}
+
+	slug := chi.URLParam(r, "slug")
+	if !isValidSlug(slug) {
+		writeError(w, http.StatusBadRequest, "Invalid skill slug")
+		return
+	}
+
+	var inst database.Instance
+	if err := database.DB.First(&inst, id).Error; err != nil {
+		writeError(w, http.StatusNotFound, "Instance not found")
+		return
+	}
+
+	if !middleware.CanAccessInstance(r, inst.ID) {
+		writeError(w, http.StatusForbidden, "Access denied")
+		return
+	}
+
+	client, ok := SSHMgr.GetConnection(inst.ID)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "Agent must be running to view skill files")
+		return
+	}
+
+	remoteRoot := "/home/claworc/.openclaw/skills/" + slug
+	quotedRoot := sshproxy.ShellQuote(remoteRoot)
+
+	// Prune .git, node_modules, .venv directories, and find all files.
+	// Note: dd if="$file" bs=1024 count=8 reads up to 8KB.
+	cmd := fmt.Sprintf(`find %s \( -name .git -o -name node_modules -o -name .venv \) -prune -o -type f -exec sh -c '
+  root=%s
+  root_clean=${root%%/}
+  for file do
+    sz=$(wc -c < "$file")
+    if [ $(dd if="$file" bs=1024 count=8 2>/dev/null | tr -d -c "\000" | wc -c) -gt 0 ]; then
+      is_bin="true"
+    else
+      is_bin="false"
+    fi
+    rel_path=${file#"$root_clean/"}
+    echo "$sz $is_bin $rel_path"
+  done
+' sh {} +`, quotedRoot, quotedRoot)
+
+	stdout, stderr, code, err := sshproxy.RunCommand(client, cmd)
+	if err != nil || code != 0 {
+		writeError(w, http.StatusInternalServerError, "Failed to list remote files: "+stderr)
+		return
+	}
+
+	var files []skillFileEntry
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		size, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		isBinary := parts[1] == "true"
+		relPath := parts[2]
+
+		files = append(files, skillFileEntry{
+			Path:   relPath,
+			Size:   size,
+			Binary: isBinary,
+		})
+	}
+
+	if files == nil {
+		files = []skillFileEntry{}
+	}
+
+	writeJSON(w, http.StatusOK, files)
+}
+
+func GetInstanceSkillFile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid instance ID")
+		return
+	}
+
+	slug := chi.URLParam(r, "slug")
+	if !isValidSlug(slug) {
+		writeError(w, http.StatusBadRequest, "Invalid skill slug")
+		return
+	}
+
+	var inst database.Instance
+	if err := database.DB.First(&inst, id).Error; err != nil {
+		writeError(w, http.StatusNotFound, "Instance not found")
+		return
+	}
+
+	if !middleware.CanAccessInstance(r, inst.ID) {
+		writeError(w, http.StatusForbidden, "Access denied")
+		return
+	}
+
+	client, ok := SSHMgr.GetConnection(inst.ID)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "Agent must be running to view skill files")
+		return
+	}
+
+	relPath := chi.URLParam(r, "*")
+	absPath, err := resolveRemoteSkillFilePath(slug, relPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid file path: "+err.Error())
+		return
+	}
+
+	// Size check over SSH
+	sizeCmd := fmt.Sprintf("wc -c < %s", sshproxy.ShellQuote(absPath))
+	sizeStdout, stderr, code, err := sshproxy.RunCommand(client, sizeCmd)
+	if err != nil || code != 0 {
+		if strings.Contains(stderr, "No such file or directory") || strings.Contains(err.Error(), "No such file") {
+			writeError(w, http.StatusNotFound, "File not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "Failed to get file size: "+stderr)
+		return
+	}
+
+	sizeStr := strings.TrimSpace(sizeStdout)
+	size, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to parse file size")
+		return
+	}
+
+	if size > 2*1024*1024 {
+		writeError(w, http.StatusRequestEntityTooLarge, "File exceeds 2MB size limit")
+		return
+	}
+
+	data, err := sshproxy.ReadFile(client, absPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "File not found: "+err.Error())
+		return
+	}
+
+	isBinary := bytes.Contains(data, []byte{0})
+	var content string
+	if !isBinary {
+		content = string(data)
+	}
+
+	writeJSON(w, http.StatusOK, skillFileContent{
+		Content: content,
+		Binary:  isBinary,
+	})
+}
+
+func PutInstanceSkillFile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid instance ID")
+		return
+	}
+
+	slug := chi.URLParam(r, "slug")
+	if !isValidSlug(slug) {
+		writeError(w, http.StatusBadRequest, "Invalid skill slug")
+		return
+	}
+
+	var inst database.Instance
+	if err := database.DB.First(&inst, id).Error; err != nil {
+		writeError(w, http.StatusNotFound, "Instance not found")
+		return
+	}
+
+	if !middleware.CanMutateInstance(r, inst.ID) {
+		writeError(w, http.StatusForbidden, "Access denied")
+		return
+	}
+
+	client, ok := SSHMgr.GetConnection(inst.ID)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "Agent must be running to modify skill files")
+		return
+	}
+
+	relPath := chi.URLParam(r, "*")
+	absPath, err := resolveRemoteSkillFilePath(slug, relPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid file path: "+err.Error())
+		return
+	}
+
+	var reqBody struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// 2MB size cap check
+	if len(reqBody.Content) > 2*1024*1024 {
+		writeError(w, http.StatusRequestEntityTooLarge, "File content exceeds 2MB limit")
+		return
+	}
+
+	isSKILLMD := relPath == "SKILL.md"
+	var oldFM, newFM *skillFrontmatter
+	if isSKILLMD {
+		oldContent, err := sshproxy.ReadFile(client, absPath)
+		if err == nil {
+			oldFM, _ = parseSkillFrontmatter(oldContent)
+		}
+		var errParse error
+		newFM, errParse = parseSkillFrontmatter([]byte(reqBody.Content))
+		if errParse != nil {
+			writeError(w, http.StatusBadRequest, "Invalid SKILL.md: "+errParse.Error())
+			return
+		}
+	}
+
+	err = sshproxy.WriteFile(client, absPath, []byte(reqBody.Content))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to write file: "+err.Error())
+		return
+	}
+
+	if isSKILLMD {
+		// Update Database entry
+		instSkill := database.InstanceSkill{
+			InstanceID: inst.ID,
+			Slug:       slug,
+			Name:       newFM.Name,
+			Summary:    newFM.Description,
+			Status:     "deployed",
+		}
+		database.DB.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "instance_id"}, {Name: "slug"}},
+			DoUpdates: clause.AssignmentColumns([]string{"name", "summary", "status", "updated_at"}),
+		}).Create(&instSkill)
+
+		// Check if config changed
+		changed := false
+		if oldFM == nil {
+			changed = true
+		} else if oldFM.Name != newFM.Name {
+			changed = true
+		} else if !reflect.DeepEqual(oldFM.MCP, newFM.MCP) {
+			changed = true
+		}
+
+		if changed {
+			instanceConn := sshproxy.NewSSHInstance(client)
+			// Teardown old MCP if existed
+			if oldFM != nil && oldFM.MCP != nil {
+				_, _, _, _ = instanceConn.ExecOpenclaw(r.Context(), "mcp", "unset", oldFM.MCP.Name)
+				if oldFM.MCP.Transport == "sse" {
+					orch := orchestrator.Get()
+					if orch != nil {
+						sidecarName := fmt.Sprintf("mcp-%d-%s", inst.ID, slug)
+						_ = orch.DeleteWorkload(r.Context(), orchestrator.WorkloadSpec{Name: sidecarName})
+					}
+				}
+			}
+
+			// Deploy new MCP if exists
+			if newFM.MCP != nil {
+				globalEnv := LoadGlobalEnvVars()
+				instEnv := LoadInstanceEnvVars(inst)
+				mergedEnv := make(map[string]string)
+				MergeUserEnvVars(mergedEnv, globalEnv, instEnv)
+
+				if newFM.MCP.Transport == "sse" {
+					if newFM.MCP.Docker == nil {
+						writeError(w, http.StatusBadRequest, "Docker config is required for SSE transport")
+						return
+					}
+					resolvedEnv := make(map[string]string)
+					for k, v := range newFM.MCP.Docker.Env {
+						resolvedEnv[k] = resolvePlaceholders(v, mergedEnv)
+					}
+
+					orch := orchestrator.Get()
+					if orch == nil {
+						writeError(w, http.StatusInternalServerError, "Orchestrator unavailable")
+						return
+					}
+
+					sidecarName := fmt.Sprintf("mcp-%d-%s", inst.ID, slug)
+					spec := orchestrator.WorkloadSpec{
+						Name:    sidecarName,
+						Image:   newFM.MCP.Docker.Image,
+						Command: newFM.MCP.Docker.Command,
+						Env:     resolvedEnv,
+						Ports: []orchestrator.PortSpec{
+							{
+								ContainerPort: newFM.MCP.Docker.Port,
+							},
+						},
+						Labels: map[string]string{
+							"managed-by":  "claworc",
+							"type":        "mcp-sidecar",
+							"instance_id": fmt.Sprintf("%d", inst.ID),
+							"skill":       slug,
+						},
+						IngressAllowedFrom: []string{
+							inst.Name,
+						},
+					}
+					if err := orch.Apply(r.Context(), spec); err != nil {
+						writeError(w, http.StatusInternalServerError, "Failed to apply sidecar: "+err.Error())
+						return
+					}
+
+					// wait for healthy
+					healthy := false
+					for attempt := 0; attempt < 30; attempt++ {
+						status, err := orch.GetInstanceStatus(r.Context(), sidecarName)
+						if err == nil && status == "running" {
+							healthy = true
+							break
+						}
+						select {
+						case <-r.Context().Done():
+							break
+						case <-time.After(1 * time.Second):
+						}
+					}
+					if !healthy {
+						writeError(w, http.StatusInternalServerError, "Sidecar failed to start")
+						return
+					}
+
+					url := fmt.Sprintf("http://%s:%d/sse", sidecarName, newFM.MCP.Docker.Port)
+					_, stderr, code, err := instanceConn.ExecOpenclaw(r.Context(), "mcp", "add", newFM.MCP.Name, "--transport", "sse", "--url", url)
+					if err != nil || code != 0 {
+						writeError(w, http.StatusInternalServerError, "Failed to register MCP server over SSE: "+stderr)
+						return
+					}
+				} else if newFM.MCP.Transport == "stdio" {
+					if newFM.MCP.Local == nil {
+						writeError(w, http.StatusBadRequest, "Local config is required for stdio transport")
+						return
+					}
+					resolvedEnv := make(map[string]string)
+					for k, v := range newFM.MCP.Local.Env {
+						resolvedEnv[k] = resolvePlaceholders(v, mergedEnv)
+					}
+
+					cmdArgs := []string{"mcp", "add", newFM.MCP.Name, "--transport", "stdio", "--command", newFM.MCP.Local.Command}
+					if len(newFM.MCP.Local.Args) > 0 {
+						joinedArgs := strings.Join(newFM.MCP.Local.Args, " ")
+						cmdArgs = append(cmdArgs, "--args", joinedArgs)
+					}
+					for k, v := range resolvedEnv {
+						cmdArgs = append(cmdArgs, "--env", fmt.Sprintf("%s=%s", k, v))
+					}
+
+					_, stderr, code, err := instanceConn.ExecOpenclaw(r.Context(), cmdArgs...)
+					if err != nil || code != 0 {
+						writeError(w, http.StatusInternalServerError, "Failed to register MCP server over Stdio: "+stderr)
+						return
+					}
+				}
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func StreamInstanceSkillLogs(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid instance ID")
+		return
+	}
+
+	slug := chi.URLParam(r, "slug")
+	if !isValidSlug(slug) {
+		writeError(w, http.StatusBadRequest, "Invalid skill slug")
+		return
+	}
+
+	var inst database.Instance
+	if err := database.DB.First(&inst, id).Error; err != nil {
+		writeError(w, http.StatusNotFound, "Instance not found")
+		return
+	}
+
+	if !middleware.CanAccessInstance(r, inst.ID) {
+		writeError(w, http.StatusForbidden, "Access denied")
+		return
+	}
+
+	// Determine sidecar name
+	sidecarName := fmt.Sprintf("mcp-%d-%s", inst.ID, slug)
+
+	orch := orchestrator.Get()
+	if orch == nil {
+		writeError(w, http.StatusInternalServerError, "Orchestrator unavailable")
+		return
+	}
+
+	follow := true
+	followParam := r.URL.Query().Get("follow")
+	if followParam == "false" {
+		follow = false
+	}
+
+	tail := int64(100)
+	tailParam := r.URL.Query().Get("tail")
+	if tailParam != "" {
+		if t, err := strconv.ParseInt(tailParam, 10, 64); err == nil {
+			tail = t
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	pr, pw := io.Pipe()
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	go func() {
+		_ = orch.StreamWorkloadLogs(r.Context(), sidecarName, follow, tail, pw)
+		pw.Close()
+	}()
+
+	scanner := bufio.NewScanner(pr)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 2*1024*1024) // up to 2MB buffer limit
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	pr.Close()
+}
+

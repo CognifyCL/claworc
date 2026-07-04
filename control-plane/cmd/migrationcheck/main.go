@@ -77,6 +77,7 @@ func allMigratedModels() []interface{} {
 		&database.LLMProvider{},
 		&database.LLMGatewayKey{},
 		&database.Skill{},
+		&database.InstanceSkill{},
 		&database.Backup{},
 		&database.BackupSchedule{},
 		&database.SharedFolder{},

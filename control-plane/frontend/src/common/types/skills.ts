@@ -36,3 +36,27 @@ export interface DeployResponse {
   /** Async path: one task ID per target instance. Per-instance results arrive via SSE/toasts. */
   task_ids?: string[];
 }
+
+export interface InstanceSkill {
+  id: number;
+  instance_id: number;
+  slug: string;
+  name: string;
+  summary: string;
+  status: string; // "deployed" | "error"
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SkillFileEntry {
+  path: string;
+  size: number;
+  binary: boolean;
+}
+
+export interface SkillFileContent {
+  path: string;
+  content: string;
+  binary: boolean;
+}
+

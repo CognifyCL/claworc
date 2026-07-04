@@ -53,6 +53,9 @@ type WorkloadSpec struct {
 	// Used for one-shot setup like fixing volume ownership.
 	InitContainers []InitContainerSpec
 
+	// IngressAllowedFrom specifies which other workloads can connect to this workload.
+	IngressAllowedFrom []string
+
 	// Labels are applied to every resource generated for this workload
 	// (Deployment, Pod template, Service, NetworkPolicy).
 	Labels map[string]string

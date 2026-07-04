@@ -48,10 +48,17 @@ func (fs *fileTestFS) handleExec(cmd string) (stdout string, exitCode int) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	// Unwrap su claworc -c '...' prefix added by sshproxy.suClaworc.
+	// Unwrap su claworc -c '...' or su - claworc -c '...'
 	const suPrefix = "su claworc -c "
+	const suPrefix2 = "su - claworc -c "
 	if strings.HasPrefix(cmd, suPrefix) {
 		cmd = fileExtractQuotedArg(cmd[len(suPrefix):])
+	} else if strings.HasPrefix(cmd, suPrefix2) {
+		cmd = fileExtractQuotedArg(cmd[len(suPrefix2):])
+	}
+
+	if strings.HasPrefix(cmd, "openclaw ") {
+		return "", 0
 	}
 
 	switch {
@@ -70,6 +77,51 @@ func (fs *fileTestFS) handleExec(cmd string) (stdout string, exitCode int) {
 		return "", 0
 	case strings.HasPrefix(cmd, "echo '") && strings.Contains(cmd, "| base64 -d >>"):
 		return fs.handleBase64Append(cmd)
+	case strings.HasPrefix(cmd, "wc -c < "):
+		path := fileExtractShellArg(cmd, "wc -c < ")
+		path = strings.Trim(path, "'\"")
+		content, ok := fs.files[path]
+		if !ok {
+			return fmt.Sprintf("wc: %s: No such file or directory", path), 1
+		}
+		return fmt.Sprintf("%d\n", len(content)), 0
+	case strings.HasPrefix(cmd, "find "):
+		parts := strings.Fields(cmd)
+		if len(parts) < 2 {
+			return "find: missing path", 1
+		}
+		root := parts[1]
+		root = strings.Trim(root, "'\"")
+		if !fs.dirs[root] {
+			return fmt.Sprintf("find: '%s': No such file or directory", root), 2
+		}
+		var lines []string
+		prefix := root
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		for fpath, content := range fs.files {
+			if strings.HasPrefix(fpath, prefix) {
+				relPath := fpath[len(prefix):]
+				segments := strings.Split(relPath, "/")
+				prune := false
+				for _, seg := range segments {
+					if seg == "node_modules" || seg == ".git" || seg == ".venv" {
+						prune = true
+						break
+					}
+				}
+				if prune {
+					continue
+				}
+				isBin := "false"
+				if bytes.Contains(content, []byte{0}) {
+					isBin = "true"
+				}
+				lines = append(lines, fmt.Sprintf("%d %s %s", len(content), isBin, relPath))
+			}
+		}
+		return strings.Join(lines, "\n") + "\n", 0
 	default:
 		return fmt.Sprintf("unknown command: %s", cmd), 127
 	}

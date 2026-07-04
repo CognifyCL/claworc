@@ -9,6 +9,10 @@ import {
   saveSkillFile,
   searchClawhub,
   uploadSkill,
+  listInstanceSkills,
+  listInstanceSkillFiles,
+  getInstanceSkillFile,
+  saveInstanceSkillFile,
 } from "@common/api/skills";
 import { errorToast, successToast } from "@common/utils/toast";
 
@@ -78,32 +82,46 @@ export function useClawhubSearch(q: string, enabled: boolean) {
   });
 }
 
-export function useSkillFiles(slug: string | null) {
+export function useInstanceSkills(id: number) {
   return useQuery({
-    queryKey: ["skill-files", slug],
-    queryFn: () => listSkillFiles(slug as string),
+    queryKey: ["instance-skills", id],
+    queryFn: () => listInstanceSkills(id),
+  });
+}
+
+export function useSkillFiles(slug: string | null, instanceId?: number) {
+  return useQuery({
+    queryKey: instanceId ? ["instance-skill-files", instanceId, slug] : ["skill-files", slug],
+    queryFn: () => instanceId ? listInstanceSkillFiles(instanceId, slug as string) : listSkillFiles(slug as string),
     enabled: !!slug,
   });
 }
 
-export function useSkillFile(slug: string | null, path: string | null) {
+export function useSkillFile(slug: string | null, path: string | null, instanceId?: number) {
   return useQuery({
-    queryKey: ["skill-file", slug, path],
-    queryFn: () => getSkillFile(slug as string, path as string),
+    queryKey: instanceId ? ["instance-skill-file", instanceId, slug, path] : ["skill-file", slug, path],
+    queryFn: () => instanceId ? getInstanceSkillFile(instanceId, slug as string, path as string) : getSkillFile(slug as string, path as string),
     enabled: !!slug && !!path,
   });
 }
 
-export function useSaveSkillFile(slug: string) {
+export function useSaveSkillFile(slug: string, instanceId?: number) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ path, content }: { path: string; content: string }) =>
-      saveSkillFile(slug, path, content),
+      instanceId ? saveInstanceSkillFile(instanceId, slug, path, content) : saveSkillFile(slug, path, content),
     onSuccess: (_data, { path }) => {
-      qc.invalidateQueries({ queryKey: ["skill-files", slug] });
-      qc.invalidateQueries({ queryKey: ["skill-file", slug, path] });
-      if (path === "SKILL.md") {
-        qc.invalidateQueries({ queryKey: ["skills"] });
+      if (instanceId) {
+        qc.invalidateQueries({ queryKey: ["instance-skill-files", instanceId, slug] });
+        qc.invalidateQueries({ queryKey: ["instance-skill-file", instanceId, slug, path] });
+        qc.invalidateQueries({ queryKey: ["instances", instanceId] });
+        qc.invalidateQueries({ queryKey: ["instance-skills", instanceId] });
+      } else {
+        qc.invalidateQueries({ queryKey: ["skill-files", slug] });
+        qc.invalidateQueries({ queryKey: ["skill-file", slug, path] });
+        if (path === "SKILL.md") {
+          qc.invalidateQueries({ queryKey: ["skills"] });
+        }
       }
       successToast("File saved");
     },

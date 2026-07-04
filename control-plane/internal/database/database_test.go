@@ -17,10 +17,13 @@ func setupTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
+	if err := db.Exec("PRAGMA foreign_keys = ON;").Error; err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
 	if err := db.AutoMigrate(
 		&Instance{}, &Setting{}, &User{}, &UserInstance{},
 		&WebAuthnCredential{}, &LLMProvider{}, &LLMGatewayKey{},
-		&Skill{}, &Backup{}, &BackupSchedule{}, &SharedFolder{},
+		&Skill{}, &InstanceSkill{}, &Backup{}, &BackupSchedule{}, &SharedFolder{},
 		&Team{}, &TeamMember{}, &TeamProvider{},
 	); err != nil {
 		t.Fatalf("auto-migrate: %v", err)
@@ -378,3 +381,57 @@ func TestListDueSchedules(t *testing.T) {
 		t.Errorf("due schedules = %d, want 1", len(due))
 	}
 }
+
+func TestInstanceSkill_CRUD(t *testing.T) {
+	setupTestDB(t)
+
+	// Create Instance first
+	inst := &Instance{
+		Name:        "test-agent",
+		DisplayName: "Test Agent",
+		Status:      "running",
+	}
+	if err := DB.Create(inst).Error; err != nil {
+		t.Fatalf("Create Instance: %v", err)
+	}
+
+	// Create InstanceSkill
+	skill := &InstanceSkill{
+		InstanceID: inst.ID,
+		Slug:       "test-skill",
+		Name:       "Test Skill",
+		Summary:    "A test skill description",
+	}
+	if err := DB.Create(skill).Error; err != nil {
+		t.Fatalf("Create InstanceSkill: %v", err)
+	}
+
+	// Verify ID is assigned and default status is "deployed"
+	if skill.ID == 0 {
+		t.Error("expected ID to be assigned")
+	}
+	if skill.Status != "deployed" {
+		t.Errorf("expected default status to be %q, got %q", "deployed", skill.Status)
+	}
+
+	// Query from DB
+	var fetched InstanceSkill
+	if err := DB.First(&fetched, skill.ID).Error; err != nil {
+		t.Fatalf("Fetch InstanceSkill: %v", err)
+	}
+	if fetched.Slug != "test-skill" || fetched.Name != "Test Skill" {
+		t.Errorf("unexpected skill fields: %+v", fetched)
+	}
+
+	// Test cascade delete
+	if err := DB.Delete(inst).Error; err != nil {
+		t.Fatalf("Delete Instance: %v", err)
+	}
+
+	var count int64
+	DB.Model(&InstanceSkill{}).Where("instance_id = ?", inst.ID).Count(&count)
+	if count > 0 {
+		t.Error("expected InstanceSkill to be cascade-deleted")
+	}
+}
+

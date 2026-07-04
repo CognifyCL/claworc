@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import MonacoConfigEditor from "@common/components/MonacoConfigEditor";
 import { useSkillFile, useSkillFiles, useSaveSkillFile } from "@common/hooks/useSkills";
-import type { Skill } from "@common/types/skills";
+import type { Skill, InstanceSkill } from "@common/types/skills";
 
 interface SkillEditorModalProps {
-  skill: Skill;
+  skill: Skill | InstanceSkill;
+  instanceId?: number;
   onClose: () => void;
 }
 
@@ -33,11 +34,11 @@ function languageFor(path: string): string {
   return LANGUAGE_BY_EXT[ext] ?? "plaintext";
 }
 
-export default function SkillEditorModal({ skill, onClose }: SkillEditorModalProps) {
-  const { data: files, isLoading: filesLoading } = useSkillFiles(skill.slug);
+export default function SkillEditorModal({ skill, instanceId, onClose }: SkillEditorModalProps) {
+  const { data: files, isLoading: filesLoading } = useSkillFiles(skill.slug, instanceId);
   const [selected, setSelected] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
-  const save = useSaveSkillFile(skill.slug);
+  const save = useSaveSkillFile(skill.slug, instanceId);
 
   // Auto-select the first non-binary file (or first file) when the list arrives.
   useEffect(() => {
@@ -54,6 +55,7 @@ export default function SkillEditorModal({ skill, onClose }: SkillEditorModalPro
   const { data: fileContent, isLoading: contentLoading } = useSkillFile(
     selectedEntry && !selectedEntry.binary ? skill.slug : null,
     selectedEntry && !selectedEntry.binary ? selectedEntry.path : null,
+    instanceId,
   );
 
   const currentValue =

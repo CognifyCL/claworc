@@ -55,6 +55,20 @@ type Skill struct {
 	UpdatedAt       time.Time `gorm:"autoUpdateTime" json:"updated_at"`
 }
 
+type InstanceSkill struct {
+	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	InstanceID uint      `gorm:"uniqueIndex:idx_instance_skill_slug;not null" json:"instance_id"`
+	Slug       string    `gorm:"uniqueIndex:idx_instance_skill_slug;not null" json:"slug"`
+	Name       string    `gorm:"not null" json:"name"`
+	Summary    string    `json:"summary"`
+	Status     string    `gorm:"not null;default:deployed" json:"status"`
+	CreatedAt  time.Time `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt  time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+
+	Instance   Instance  `gorm:"foreignKey:InstanceID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+
 type Instance struct {
 	ID uint `gorm:"primaryKey;autoIncrement" json:"id"`
 	// UUID is a stable, non-enumerable identifier used in webhook URLs and

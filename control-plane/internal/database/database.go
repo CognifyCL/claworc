@@ -90,6 +90,9 @@ func openDialector(d gorm.Dialector, driver Driver, pool PoolConfig) (*gorm.DB, 
 		if _, err := sqlDB.Exec("PRAGMA busy_timeout=5000"); err != nil {
 			return nil, fmt.Errorf("set busy timeout: %w", err)
 		}
+		if _, err := sqlDB.Exec("PRAGMA foreign_keys=ON"); err != nil {
+			return nil, fmt.Errorf("enable foreign keys: %w", err)
+		}
 	default:
 		sqlDB.SetMaxOpenConns(pool.MaxOpenConns)
 		sqlDB.SetMaxIdleConns(pool.MaxIdleConns)

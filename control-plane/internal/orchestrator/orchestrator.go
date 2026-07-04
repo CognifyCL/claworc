@@ -70,6 +70,9 @@ type ContainerOrchestrator interface {
 
 	// DeleteSharedVolume removes the backing volume/PVC for a shared folder.
 	DeleteSharedVolume(ctx context.Context, folderID uint) error
+
+	// StreamWorkloadLogs streams container logs for sidecar workloads.
+	StreamWorkloadLogs(ctx context.Context, name string, follow bool, tailLines int64, writer io.Writer) error
 }
 
 // SharedFolderMount describes a shared volume to mount into a container.

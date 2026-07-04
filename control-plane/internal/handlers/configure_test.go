@@ -3,13 +3,11 @@ package handlers
 import (
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gluk-w/claworc/control-plane/internal/database"
-	"github.com/gluk-w/claworc/control-plane/internal/orchestrator"
 )
 
 // mockInstance records ExecOpenclaw calls and returns queued results.
@@ -39,56 +37,12 @@ func (m *mockInstance) ExecOpenclaw(_ context.Context, args ...string) (string, 
 	return r.stdout, r.stderr, r.code, r.err
 }
 
-// mockOps implements orchestrator.ContainerOrchestrator for tests.
-type mockOps struct{}
 
-func (mockOps) Initialize(_ context.Context) error                                  { return nil }
-func (mockOps) IsAvailable(_ context.Context) bool                                  { return true }
-func (mockOps) BackendName() string                                                 { return "mock" }
-func (mockOps) CreateInstance(_ context.Context, _ orchestrator.CreateParams) error { return nil }
-func (mockOps) DeleteInstance(_ context.Context, _ string) error                    { return nil }
-func (mockOps) StartInstance(_ context.Context, _ string) error                     { return nil }
-func (mockOps) StopInstance(_ context.Context, _ string) error                      { return nil }
-func (mockOps) RestartInstance(_ context.Context, _ string, _ orchestrator.CreateParams) error {
-	return nil
-}
-func (mockOps) GetInstanceStatus(_ context.Context, _ string) (string, error)    { return "running", nil }
-func (mockOps) GetInstanceImageInfo(_ context.Context, _ string) (string, error) { return "", nil }
-func (mockOps) UpdateInstanceConfig(_ context.Context, _ string, _ string) error { return nil }
-func (mockOps) CloneVolumes(_ context.Context, _, _ string) error                { return nil }
-func (mockOps) ConfigureSSHAccess(_ context.Context, _ uint, _ string) error     { return nil }
-func (mockOps) GetSSHAddress(_ context.Context, _ uint) (string, int, error)     { return "", 0, nil }
-func (mockOps) UpdateResources(_ context.Context, _ string, _ orchestrator.UpdateResourcesParams) error {
-	return nil
-}
-func (mockOps) GetContainerStats(_ context.Context, _ string) (*orchestrator.ContainerStats, error) {
-	return nil, nil
-}
-func (mockOps) UpdateImage(_ context.Context, _ string, _ orchestrator.CreateParams) error {
-	return nil
-}
-func (mockOps) ExecInInstance(_ context.Context, _ string, _ []string) (string, string, int, error) {
-	return "", "", 0, nil
-}
-func (mockOps) StreamExecInInstance(_ context.Context, _ string, _ []string, _ io.Writer) (string, int, error) {
-	return "", 0, nil
-}
-func (mockOps) DeleteSharedVolume(_ context.Context, _ uint) error               { return nil }
-func (mockOps) CloneVolume(_ context.Context, _, _ string) error                 { return nil }
-func (mockOps) VolumeNameFor(name, suffix string) string                         { return name + "-" + suffix }
-func (mockOps) Apply(_ context.Context, _ orchestrator.WorkloadSpec) error       { return nil }
-func (mockOps) DeleteWorkload(_ context.Context, _ orchestrator.WorkloadSpec) error {
-	return nil
-}
-func (mockOps) EnsureSSHAccess(_ context.Context, _, _ string) error { return nil }
-func (mockOps) WorkloadSSHAddress(_ context.Context, _ string) (string, int, error) {
-	return "", 0, nil
-}
 
 func TestConfigureInstance_NoOp(t *testing.T) {
 	inst := &mockInstance{}
 	// Empty models and providers → early return, no calls
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test", nil, nil, 0)
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test", nil, nil, 0)
 	if len(inst.calls) != 0 {
 		t.Errorf("expected 0 calls, got %d", len(inst.calls))
 	}
@@ -96,7 +50,7 @@ func TestConfigureInstance_NoOp(t *testing.T) {
 
 func TestConfigureInstance_ModelSet(t *testing.T) {
 	inst := &mockInstance{}
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		[]string{"claude-3-5-sonnet"}, nil, 0)
 
 	if len(inst.calls) < 4 {
@@ -133,7 +87,7 @@ func TestConfigureInstance_GatewayStop(t *testing.T) {
 	providers := map[string]GatewayProvider{
 		"anthropic": {Key: "vk-test", APIType: "openai-completions"},
 	}
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		nil, providers, 40001)
 
 	if len(inst.calls) < 1 {
@@ -150,7 +104,7 @@ func TestConfigureInstance_ProvidersSet(t *testing.T) {
 	providers := map[string]GatewayProvider{
 		"anthropic": {Key: "vk-test", APIType: "openai-completions"},
 	}
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		nil, providers, 40001)
 
 	// Should have: providers unset + providers set + gateway stop
@@ -171,7 +125,7 @@ func TestConfigureInstance_NilModelsEmptySlice(t *testing.T) {
 	providers := map[string]GatewayProvider{
 		"openai": {Key: "vk-test2", APIType: "openai-completions"},
 	}
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		nil, providers, 40001)
 
 	for _, call := range inst.calls {
@@ -191,7 +145,7 @@ func TestConfigureInstance_ModelSetFailure(t *testing.T) {
 		},
 	}
 	// Should log error and return without calling gateway stop
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		[]string{"model-a"}, nil, 0)
 
 	// Only one call was made (the failed one), gateway stop should not follow
@@ -209,7 +163,7 @@ func TestConfigureInstance_ModelSetNonZeroCode(t *testing.T) {
 	providers := map[string]GatewayProvider{
 		"anthropic": {Key: "vk-test", APIType: "openai-completions"},
 	}
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		[]string{"model-a"}, providers, 40001)
 
 	hasProviders := false
@@ -244,7 +198,7 @@ func TestConfigureInstance_CustomProviderAllModels(t *testing.T) {
 		},
 	}
 	// Effective list only contains sonnet, but custom providers ignore this — both models should appear.
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		[]string{"anthropic/anthropic/claude-sonnet-4-6"}, providers, 40001)
 
 	var providersJSON string
@@ -293,7 +247,7 @@ func TestConfigureInstance_CatalogProviderModelsFiltered(t *testing.T) {
 	providers := map[string]GatewayProvider{
 		"anthropic": {Key: "vk-test", APIType: "anthropic-messages", CatalogKey: "anthropic"},
 	}
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		[]string{"anthropic/anthropic/claude-sonnet-4-6"}, providers, 40001)
 
 	var providersJSON string
@@ -347,7 +301,7 @@ func TestConfigureInstance_CatalogProviderWithCachedModelsFiltered(t *testing.T)
 		},
 	}
 	// Effective list only contains sonnet.
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		[]string{"anthropic/anthropic/claude-sonnet-4-6"}, providers, 40001)
 
 	var providersJSON string
@@ -392,7 +346,7 @@ func TestConfigureInstance_CatalogProviderEmptyWhenNoneSelected(t *testing.T) {
 	providers := map[string]GatewayProvider{
 		"anthropic": {Key: "vk-test", APIType: "anthropic-messages", CatalogKey: "anthropic"},
 	}
-	ConfigureInstance(context.Background(), mockOps{}, inst, "test",
+	ConfigureInstance(context.Background(), &mockOrchestrator{}, inst, "test",
 		nil, providers, 40001)
 
 	var providersJSON string
