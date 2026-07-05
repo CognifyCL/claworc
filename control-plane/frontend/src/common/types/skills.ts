@@ -5,6 +5,8 @@ export interface Skill {
   summary: string;
   /** Env var names this skill declares it needs (parsed from SKILL.md frontmatter). */
   required_env_vars: string[];
+  git_url?: string;
+  git_branch?: string;
   created_at: string;
   updated_at: string;
 }

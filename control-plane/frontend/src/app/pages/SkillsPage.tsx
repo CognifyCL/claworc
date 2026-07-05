@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Search, Loader2 } from "lucide-react";
-import { useSkills, useDeleteSkill, useClawhubSearch, useImportSkill } from "@common/hooks/useSkills";
+import { useSkills, useDeleteSkill, useClawhubSearch, useImportSkill, usePullGitSkill } from "@common/hooks/useSkills";
 import { LibrarySkillCard, DiscoverSkillCard } from "@common/components/skills/SkillCard";
 import DeployModal from "@common/components/skills/DeployModal";
 import UploadSkillModal from "@common/components/skills/UploadSkillModal";
@@ -24,7 +24,7 @@ interface DeployTarget {
 export default function SkillsPage() {
   const { isAdmin } = useAuth();
   const [tab, setTab] = useState<Tab>("library");
-  const [showUpload, setShowUpload] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
   const [deployTarget, setDeployTarget] = useState<DeployTarget | null>(null);
   const [editSlug, setEditSlug] = useState<string | null>(null);
   const [existingChoice, setExistingChoice] = useState<ClawhubResult | null>(null);
@@ -36,6 +36,7 @@ export default function SkillsPage() {
   const { data: skills, isLoading: skillsLoading } = useSkills();
   const { mutate: deleteSkill } = useDeleteSkill();
   const { mutateAsync: importSkill, isPending: importPending } = useImportSkill();
+  const { mutateAsync: pullGitSkill } = usePullGitSkill();
 
   const {
     data: clawhubData,
@@ -108,6 +109,22 @@ export default function SkillsPage() {
     deleteSkill(slug);
   };
 
+  const handlePull = async (slug: string) => {
+    try {
+      await pullGitSkill({ slug });
+    } catch (error: any) {
+      if (error?.response?.status === 409) {
+        if (confirm("Standard update failed (likely due to local edits). Would you like to force overwrite? This will discard all local changes.")) {
+          try {
+            await pullGitSkill({ slug, force: true });
+          } catch (e) {
+            // Error is handled/shown by React Query or global handler
+          }
+        }
+      }
+    }
+  };
+
 
   return (
     <Page
@@ -115,10 +132,10 @@ export default function SkillsPage() {
       actions={
         isAdmin ? (
           <button
-            onClick={() => setShowUpload(true)}
+            onClick={() => setShowAddModal(true)}
             className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 ${tab !== "library" ? "invisible" : ""}`}
           >
-            Upload Skill
+            Add Skill
           </button>
         ) : undefined
       }
@@ -155,6 +172,7 @@ export default function SkillsPage() {
                   onDeploy={handleDeployLibrary}
                   onEdit={isAdmin ? handleEdit : undefined}
                   onDelete={isAdmin ? handleDelete : undefined}
+                  onPull={isAdmin ? handlePull : undefined}
                 />
               ))}
             </div>
@@ -214,10 +232,10 @@ export default function SkillsPage() {
       )}
 
       {/* Modals */}
-      {showUpload && (
+      {showAddModal && (
         <UploadSkillModal
-          onClose={() => setShowUpload(false)}
-          onUploaded={() => setShowUpload(false)}
+          onClose={() => setShowAddModal(false)}
+          onUploaded={() => setShowAddModal(false)}
         />
       )}
       {editSlug && (() => {

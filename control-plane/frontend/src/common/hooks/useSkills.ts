@@ -13,6 +13,9 @@ import {
   listInstanceSkillFiles,
   getInstanceSkillFile,
   saveInstanceSkillFile,
+  createSkillFromWizard,
+  importGitSkill,
+  pullGitSkillUpdates,
 } from "@common/api/skills";
 import { errorToast, successToast } from "@common/utils/toast";
 
@@ -142,5 +145,44 @@ export function useDeploySkill() {
       source: "library" | "clawhub";
       version?: string;
     }) => deploySkill(slug, instanceIds, source, version),
+  });
+}
+
+export function useCreateSkill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createSkillFromWizard,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["skills"] });
+      successToast("Skill created successfully");
+    },
+    onError: (error) => errorToast("Failed to create skill", error),
+  });
+}
+
+export function useImportGitSkill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: importGitSkill,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["skills"] });
+      successToast("Skill imported successfully");
+    },
+    onError: (error) => errorToast("Failed to import skill from Git", error),
+  });
+}
+
+export function usePullGitSkill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, force }: { slug: string; force?: boolean }) => pullGitSkillUpdates(slug, force),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["skills"] });
+      successToast("Skill updated successfully");
+    },
+    onError: (error) => {
+      if ((error as any)?.response?.status === 409) return;
+      errorToast("Failed to pull skill updates", error);
+    },
   });
 }

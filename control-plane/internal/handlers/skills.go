@@ -10,7 +10,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -27,6 +29,7 @@ import (
 	"github.com/gluk-w/claworc/control-plane/internal/orchestrator"
 	"github.com/gluk-w/claworc/control-plane/internal/sshproxy"
 	"github.com/gluk-w/claworc/control-plane/internal/taskmanager"
+	"github.com/gluk-w/claworc/control-plane/internal/utils"
 	"github.com/go-chi/chi/v5"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm/clause"
@@ -154,30 +157,44 @@ func ClawhubSearch(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type mcpDockerConfig struct {
-	Image   string            `yaml:"image"`
-	Command []string          `yaml:"command,omitempty"`
-	Port    int               `yaml:"port"`
-	Env     map[string]string `yaml:"env,omitempty"`
+	Image   string            `yaml:"image" json:"image"`
+	Command []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	Port    int               `yaml:"port" json:"port"`
+	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 type mcpLocalConfig struct {
-	Command string            `yaml:"command"`
-	Args    []string          `yaml:"args,omitempty"`
-	Env     map[string]string `yaml:"env,omitempty"`
+	Command string            `yaml:"command" json:"command"`
+	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 type mcpConfig struct {
-	Name      string           `yaml:"name"`
-	Transport string           `yaml:"transport"` // "sse" or "stdio"
-	Docker    *mcpDockerConfig `yaml:"docker,omitempty"`
-	Local     *mcpLocalConfig  `yaml:"local,omitempty"`
+	Name      string           `yaml:"name" json:"name"`
+	Transport string           `yaml:"transport" json:"transport"` // "sse" or "stdio"
+	Docker    *mcpDockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Local     *mcpLocalConfig  `yaml:"local,omitempty" json:"local,omitempty"`
 }
 
 type skillFrontmatter struct {
-	Name            string     `yaml:"name"`
-	Description     string     `yaml:"description"`
-	RequiredEnvVars []string   `yaml:"required_env_vars,omitempty"`
-	MCP             *mcpConfig `yaml:"mcp,omitempty"`
+	Name            string     `yaml:"name" json:"name"`
+	Description     string     `yaml:"description" json:"description"`
+	RequiredEnvVars []string   `yaml:"required_env_vars,omitempty" json:"required_env_vars,omitempty"`
+	MCP             *mcpConfig `yaml:"mcp,omitempty" json:"mcp,omitempty"`
+}
+
+type CreateSkillRequest struct {
+	Name            string            `json:"name"`
+	Slug            string            `json:"slug"`
+	Summary         string            `json:"summary"`
+	RequiredEnvVars []string          `json:"required_env_vars"`
+	MCP             *mcpConfig        `json:"mcp,omitempty"`
+	Files           map[string]string `json:"files"` // map: filename -> content
+}
+
+type ImportGitSkillRequest struct {
+	GitURL    string `json:"git_url"`
+	GitBranch string `json:"git_branch,omitempty"`
 }
 
 var placeholderRegex = regexp.MustCompile(`\{\{([A-Za-z0-9_]+)\}\}`)
@@ -252,6 +269,8 @@ type skillResponse struct {
 	Name            string   `json:"name"`
 	Summary         string   `json:"summary"`
 	RequiredEnvVars []string `json:"required_env_vars"`
+	GitURL          string   `json:"git_url,omitempty"`
+	GitBranch       string   `json:"git_branch,omitempty"`
 	CreatedAt       string   `json:"created_at"`
 	UpdatedAt       string   `json:"updated_at"`
 }
@@ -263,6 +282,8 @@ func skillToResponse(s database.Skill) skillResponse {
 		Name:            s.Name,
 		Summary:         s.Summary,
 		RequiredEnvVars: parseRequiredEnvVars(s.RequiredEnvVars),
+		GitURL:          s.GitURL,
+		GitBranch:       s.GitBranch,
 		CreatedAt:       s.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:       s.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
@@ -1912,5 +1933,246 @@ func StreamInstanceSkillLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pr.Close()
+}
+
+func CreateSkillFromWizard(w http.ResponseWriter, r *http.Request) {
+	var req CreateSkillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if !isValidSlug(req.Slug) || !isSafeSlug(req.Slug) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid slug"})
+		return
+	}
+
+	// Check if already exists
+	var existing database.Skill
+	if err := database.DB.Where("slug = ?", req.Slug).First(&existing).Error; err == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("skill %s already exists", req.Slug)})
+		return
+	}
+
+	// Dynamically format SKILL.md
+	fm := skillFrontmatter{
+		Name:            req.Name,
+		Description:     req.Summary,
+		RequiredEnvVars: req.RequiredEnvVars,
+		MCP:             req.MCP,
+	}
+	yamlBytes, err := yaml.Marshal(fm)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to serialize frontmatter"})
+		return
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("---\n")
+	buf.Write(yamlBytes)
+	buf.WriteString("---\n\n")
+	buf.WriteString("# " + req.Name + "\n\n")
+	buf.WriteString(req.Summary + "\n")
+
+	filesMap := make(map[string][]byte)
+	for name, content := range req.Files {
+		filesMap[name] = []byte(content)
+	}
+	filesMap["SKILL.md"] = buf.Bytes()
+
+	skill, err := saveSkillToLibrary(req.Slug, &fm, filesMap)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, skillToResponse(skill))
+}
+
+func ImportGitSkill(w http.ResponseWriter, r *http.Request) {
+	var req ImportGitSkillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	parsed, err := url.Parse(req.GitURL)
+	if err != nil || parsed.Scheme != "https" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid URL or non-HTTPS scheme"})
+		return
+	}
+
+	_, err = utils.ValidateExternalURL(req.GitURL, "")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	cleanedPath := strings.TrimSuffix(parsed.Path, "/")
+	slugCandidate := path.Base(cleanedPath)
+	slugCandidate = strings.TrimSuffix(slugCandidate, ".git")
+
+	if !isValidSlug(slugCandidate) || !isSafeSlug(slugCandidate) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid slug candidate in Git URL"})
+		return
+	}
+
+	var existing database.Skill
+	if err := database.DB.Where("slug = ?", slugCandidate).First(&existing).Error; err == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("skill %s already exists", slugCandidate)})
+		return
+	}
+
+	destDir := filepath.Join(config.Cfg.DataPath, "skills", slugCandidate)
+	_ = os.RemoveAll(destDir)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	args := []string{"clone", "--depth", "1"}
+	if req.GitBranch != "" {
+		args = append(args, "-b", req.GitBranch)
+	}
+	args = append(args, req.GitURL, destDir)
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=echo",
+		"SSH_ASKPASS=echo",
+	)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		_ = os.RemoveAll(destDir)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("git clone failed: %s (error: %v)", stderr.String(), err)})
+		return
+	}
+
+	skillMdPath := filepath.Join(destDir, "SKILL.md")
+	content, err := os.ReadFile(skillMdPath)
+	if err != nil {
+		_ = os.RemoveAll(destDir)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing SKILL.md in cloned repository"})
+		return
+	}
+
+	fm, err := parseSkillFrontmatter(content)
+	if err != nil {
+		_ = os.RemoveAll(destDir)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid SKILL.md frontmatter: %v", err)})
+		return
+	}
+
+	skill := database.Skill{
+		Slug:            slugCandidate,
+		Name:            fm.Name,
+		Summary:         fm.Description,
+		RequiredEnvVars: encodeRequiredEnvVars(fm.RequiredEnvVars),
+		GitURL:          req.GitURL,
+		GitBranch:       req.GitBranch,
+	}
+
+	if err := database.DB.Create(&skill).Error; err != nil {
+		_ = os.RemoveAll(destDir)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("failed to save skill to DB: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, skillToResponse(skill))
+}
+
+func PullGitSkillUpdates(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	var skill database.Skill
+	if err := database.DB.Where("slug = ?", slug).First(&skill).Error; err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "skill not found"})
+		return
+	}
+
+	if skill.GitURL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "skill is not Git-linked"})
+		return
+	}
+
+	destDir := filepath.Join(config.Cfg.DataPath, "skills", skill.Slug)
+	force := r.URL.Query().Get("force") == "true"
+
+	if force {
+		if err := os.RemoveAll(destDir); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("failed to clean local folder: %v", err)})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		args := []string{"clone", "--depth", "1"}
+		if skill.GitBranch != "" {
+			args = append(args, "-b", skill.GitBranch)
+		}
+		args = append(args, skill.GitURL, destDir)
+
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_ASKPASS=echo",
+			"SSH_ASKPASS=echo",
+		)
+
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			_ = os.RemoveAll(destDir)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("git clone failed: %s (error: %v)", stderr.String(), err)})
+			return
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "git", "pull")
+		cmd.Dir = destDir
+		cmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_ASKPASS=echo",
+			"SSH_ASKPASS=echo",
+		)
+
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("git pull failed: %s", stderr.String())})
+			return
+		}
+	}
+
+	skillMdPath := filepath.Join(destDir, "SKILL.md")
+	content, err := os.ReadFile(skillMdPath)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing SKILL.md after pull"})
+		return
+	}
+
+	fm, err := parseSkillFrontmatter(content)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid SKILL.md frontmatter: %v", err)})
+		return
+	}
+
+	skill.Name = fm.Name
+	skill.Summary = fm.Description
+	skill.RequiredEnvVars = encodeRequiredEnvVars(fm.RequiredEnvVars)
+
+	if err := database.DB.Save(&skill).Error; err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("failed to update database: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, skillToResponse(skill))
 }
 

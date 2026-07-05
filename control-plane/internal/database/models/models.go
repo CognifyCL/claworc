@@ -51,6 +51,8 @@ type Skill struct {
 	Name            string    `gorm:"not null" json:"name"`
 	Summary         string    `json:"summary"`
 	RequiredEnvVars string    `gorm:"type:text;default:'[]'" json:"-"` // JSON []string of env var names the skill declares it needs
+	GitURL          string    `gorm:"type:text" json:"git_url,omitempty"`
+	GitBranch       string    `gorm:"type:text" json:"git_branch,omitempty"`
 	CreatedAt       time.Time `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt       time.Time `gorm:"autoUpdateTime" json:"updated_at"`
 }

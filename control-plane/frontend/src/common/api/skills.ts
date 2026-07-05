@@ -102,3 +102,28 @@ export async function deploySkill(
   });
   return res.data;
 }
+
+export async function createSkillFromWizard(payload: {
+  name: string;
+  slug: string;
+  summary: string;
+  required_env_vars: string[];
+  mcp?: any;
+  files: Record<string, string>;
+}): Promise<Skill> {
+  const res = await client.post<Skill>("/skills/create", payload);
+  return res.data;
+}
+
+export async function importGitSkill(payload: {
+  git_url: string;
+  git_branch?: string;
+}): Promise<Skill> {
+  const res = await client.post<Skill>("/skills/git-import", payload);
+  return res.data;
+}
+
+export async function pullGitSkillUpdates(slug: string, force = false): Promise<Skill> {
+  const res = await client.post<Skill>(`/skills/${slug}/git-pull?force=${force}`);
+  return res.data;
+}

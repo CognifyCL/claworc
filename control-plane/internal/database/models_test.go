@@ -1,6 +1,10 @@
 package database
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestParseSharedFolderInstanceIDs_Empty(t *testing.T) {
 	t.Parallel()
@@ -131,3 +135,46 @@ func TestParseEncodeSharedFolderInstanceIDs_Roundtrip(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillGitFields(t *testing.T) {
+	t.Parallel()
+	s := Skill{
+		GitURL:    "https://github.com/example/skill",
+		GitBranch: "main",
+	}
+	if s.GitURL != "https://github.com/example/skill" {
+		t.Errorf("GitURL got %q, want %q", s.GitURL, "https://github.com/example/skill")
+	}
+	if s.GitBranch != "main" {
+		t.Errorf("GitBranch got %q, want %q", s.GitBranch, "main")
+	}
+
+	// Marshaling check
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	str := string(data)
+	if !strings.Contains(str, `"git_url":"https://github.com/example/skill"`) {
+		t.Errorf("JSON does not contain git_url: %s", str)
+	}
+	if !strings.Contains(str, `"git_branch":"main"`) {
+		t.Errorf("JSON does not contain git_branch: %s", str)
+	}
+
+	// Check omitempty
+	sEmpty := Skill{}
+	dataEmpty, err := json.Marshal(sEmpty)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	strEmpty := string(dataEmpty)
+	if strings.Contains(strEmpty, "git_url") {
+		t.Errorf("JSON should omit empty git_url: %s", strEmpty)
+	}
+	if strings.Contains(strEmpty, "git_branch") {
+		t.Errorf("JSON should omit empty git_branch: %s", strEmpty)
+	}
+}
+
+

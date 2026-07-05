@@ -485,6 +485,9 @@ func main() {
 				// search) stays admin-only. Read + Deploy moved out — managers
 				// need to read library skills and deploy them to their teams.
 				r.Post("/skills", handlers.UploadSkill)
+				r.Post("/skills/create", handlers.CreateSkillFromWizard)
+				r.Post("/skills/git-import", handlers.ImportGitSkill)
+				r.Post("/skills/{slug}/git-pull", handlers.PullGitSkillUpdates)
 				r.Delete("/skills/{slug}", handlers.DeleteSkill)
 				r.Get("/skills/clawhub/search", handlers.ClawhubSearch)
 				r.Post("/skills/clawhub/import", handlers.ImportClawhubSkill)

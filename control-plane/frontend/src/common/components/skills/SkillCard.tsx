@@ -1,4 +1,4 @@
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2, RefreshCw } from "lucide-react";
 import type { Skill, ClawhubResult } from "@common/types/skills";
 
 interface LibraryCardProps {
@@ -6,9 +6,10 @@ interface LibraryCardProps {
   onDeploy: (slug: string, displayName: string) => void;
   onEdit?: (slug: string) => void;
   onDelete?: (slug: string) => void;
+  onPull?: (slug: string) => void;
 }
 
-export function LibrarySkillCard({ skill, onDeploy, onEdit, onDelete }: LibraryCardProps) {
+export function LibrarySkillCard({ skill, onDeploy, onEdit, onDelete, onPull }: LibraryCardProps) {
   return (
     <div
       className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col gap-2 hover:shadow-sm hover:border-blue-300 hover:bg-blue-50 transition-all cursor-pointer"
@@ -23,6 +24,15 @@ export function LibrarySkillCard({ skill, onDeploy, onEdit, onDelete }: LibraryC
           <span className="text-xs text-gray-400 whitespace-nowrap">
             {new Date(skill.created_at).toLocaleDateString()}
           </span>
+          {skill.git_url && onPull && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onPull(skill.slug); }}
+              className="p-1 text-gray-400 hover:text-blue-600 transition-colors"
+              title="Git Pull"
+            >
+              <RefreshCw size={14} />
+            </button>
+          )}
           {onEdit && (
             <button
               onClick={(e) => { e.stopPropagation(); onEdit(skill.slug); }}
